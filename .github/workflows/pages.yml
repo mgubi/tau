@@ -1,0 +1,106 @@
+# The page of Tau: TeXmacs in the browser with its editor in a worker and
+# its interface in the page, published on the GitHub Pages of this repository,
+#
+#   https://<owner>.github.io/<repository>/
+#
+# This repository holds nothing but this workflow: the sources are those of
+# the branch wip_tau of mgubi/texmacs (src/misc/tau, src/docs/tau-design.md),
+# which are checked out, built (the slim MuPDF, cached, then the page) and
+# published as they are. The tests are not run here: they are those of the
+# workflow of the sources (.github/workflows/tau.yml, on the branch tau_ci).
+#
+# A push to the sources does not start it. It runs when this repository
+# changes and when it is started by hand, from the Actions tab or with
+#
+#   gh workflow run pages.yml -R <owner>/<repository> [-f ref=<branch, tag or commit>]
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit of the sources
+        default: wip_tau
+
+env:
+  SOURCES: mgubi/texmacs
+  SOURCES_REF: ${{ inputs.ref || 'wip_tau' }}
+  EMSCRIPTEN_VERSION: 6.0.10
+  MUPDF_VERSION: 1.28.5
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCES }}
+          ref: ${{ env.SOURCES_REF }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      # the slim MuPDF, with the patches of TeXmacs: again only when its
+      # script, its patches, its version or Emscripten change
+      - name: Cache of MuPDF
+        uses: actions/cache@v4
+        with:
+          path: src/build-wasm/mupdf-${{ env.MUPDF_VERSION }}-source
+          key: mupdf-${{ env.MUPDF_VERSION }}-emscripten-${{ env.EMSCRIPTEN_VERSION }}-${{ hashFiles('src/misc/wasm/build-mupdf.sh', 'src/misc/wasm/mupdf-*.patch') }}
+
+      - name: MuPDF
+        run: |
+          mkdir -p build-wasm
+          sh misc/wasm/build-mupdf.sh ${{ env.MUPDF_VERSION }}
+
+      # the page with all it loads next to it: the program, the resources
+      # in packages, the fonts, the workers of the plugins
+      - name: Tau
+        run: |
+          mkdir -p build-tau
+          make -C build-tau -f ../misc/tau/Makefile -j"$(nproc)" \
+            MUPDF="$PWD/build-wasm/mupdf-${{ env.MUPDF_VERSION }}-source" web
+
+      - name: The site
+        run: |
+          site=build-tau/out/web
+          test -f $site/index.html && test -f $site/tau.wasm
+          touch $site/.nojekyll
+          ls -l $site | head -40
+          du -sh $site
+          echo "Tau of $SOURCES at \`$(git rev-parse --short=10 HEAD)\` ($SOURCES_REF), $(du -sh $site | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: src/build-tau/out/web
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
